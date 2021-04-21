@@ -115,7 +115,7 @@ object TransferFitsFile {
     def outputHeaders(headers: Chain[HeaderRow]) = Pull.output(headerRecords(headers))
 
     def go(s: Stream[F, Byte], state: ParserState): Pull[F, Byte, Unit] =
-      s.pull.uncons.flatMap {
+      s.pull.unconsN(RecordLength, true).flatMap {
         case Some((hd, tl)) =>
           if (state.invalidFile)
             Pull.output(hd) >> go(tl, state)
@@ -176,19 +176,25 @@ object TransferFitsFile {
     in => go(in, ParserState.empty).stream
   }
 
-  // For testing, it might be better to take an input stream and output a stream instead of
-  // specifying Paths.
-  // To do that, we'd need to insert a `.buffer(RecordLength)` to make sure
-  // the chunk sizes are correct for `fitsPipe`
+  def stream[F[_]: Concurrent: Files: Logger](
+    input:             Stream[F, Byte],
+    requiredHeaders:   Map[Int, List[String]],
+    additionalHeaders: Map[Int, List[FitsHeaderCard]]
+  ): Stream[F, Byte] =
+    input.through(fitsPipe(requiredHeaders, additionalHeaders))
+
   def transfer[F[_]: Concurrent: Files: Logger](
     input:             Path,
     output:            Path,
     requiredHeaders:   Map[Int, List[String]],
     additionalHeaders: Map[Int, List[FitsHeaderCard]]
   ): F[Unit] =
-    Files[F]
-      .readAll(input, chunkSize = RecordLength)
-      .through(fitsPipe(requiredHeaders, additionalHeaders))
+    stream(
+      Files[F]
+        .readAll(input, chunkSize = RecordLength),
+      requiredHeaders,
+      additionalHeaders
+    )
       .through(Files[F].writeAll(output, List(StandardOpenOption.TRUNCATE_EXISTING)))
       .compile
       .drain
